@@ -1,0 +1,97 @@
+# nvidia docker base & runtime
+
+FROM ubuntu:16.04
+LABEL maintainer "NVIDIA CORPORATION <cudatools@nvidia.com>"
+
+# install packages
+RUN apt-get update
+RUN apt-get install -y python3
+RUN apt-get install -y python3-pip
+RUN apt-get install -y vim
+
+# referred from clipper
+RUN mkdir -p /model \
+      && apt-get update \
+      && apt-get install -y libzmq5 libzmq5-dev redis-server libsodium18 build-essential
+
+RUN pip3 install cloudpickle==0.5.* pyzmq==17.0.* prometheus_client==0.1.* \
+    pyyaml==3.12.* jsonschema==2.6.* redis==2.10.* psutil==5.4.* flask==0.12.2 \
+    numpy==1.14.*
+
+
+
+
+# nvidia cuda 9.0
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates apt-transport-https gnupg-curl && \
+    rm -rf /var/lib/apt/lists/* && \
+    NVIDIA_GPGKEY_SUM=d1be581509378368edeec8c1eb2958702feedf3bc3d17011adbf24efacce4ab5 && \
+    NVIDIA_GPGKEY_FPR=ae09fe4bbd223a84b2ccfce3f60f4b3d7fa2af80 && \
+    apt-key adv --fetch-keys https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1604/x86_64/7fa2af80.pub && \
+    apt-key adv --export --no-emit-version -a $NVIDIA_GPGKEY_FPR | tail -n +5 > cudasign.pub && \
+    echo "$NVIDIA_GPGKEY_SUM  cudasign.pub" | sha256sum -c --strict - && rm cudasign.pub && \
+    echo "deb https://developer.download.nvidia.com/compute/cuda/repos/ubuntu1604/x86_64 /" > /etc/apt/sources.list.d/cuda.list && \
+    echo "deb https://developer.download.nvidia.com/compute/machine-learning/repos/ubuntu1604/x86_64 /" > /etc/apt/sources.list.d/nvidia-ml.list
+
+ENV CUDA_VERSION 9.0.176
+
+ENV CUDA_PKG_VERSION 9-0=$CUDA_VERSION-1
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cuda-cudart-$CUDA_PKG_VERSION && \
+    ln -s cuda-9.0 /usr/local/cuda && \
+    rm -rf /var/lib/apt/lists/*
+
+# nvidia-docker 1.0
+LABEL com.nvidia.volumes.needed="nvidia_driver"
+LABEL com.nvidia.cuda.version="${CUDA_VERSION}"
+
+RUN echo "/usr/local/nvidia/lib" >> /etc/ld.so.conf.d/nvidia.conf && \
+    echo "/usr/local/nvidia/lib64" >> /etc/ld.so.conf.d/nvidia.conf
+
+# Modify the environment variables
+# ENV PATH /usr/local/nvidia/bin:/usr/local/cuda/bin:${PATH}
+# ENV LD_LIBRARY_PATH /usr/local/nvidia/lib:/usr/local/nvidia/lib64
+ENV PATH /usr/local/cuda:${PATH}
+ENV LD_LIBRARY_PATH /usr/local/cuda/lib64
+
+# nvidia-container-runtime
+ENV NVIDIA_VISIBLE_DEVICES all
+ENV NVIDIA_DRIVER_CAPABILITIES compute,utility
+ENV NVIDIA_REQUIRE_CUDA "cuda>=9.0"
+
+
+ENV NCCL_VERSION 2.2.13
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        cuda-libraries-$CUDA_PKG_VERSION \
+        cuda-cublas-9-0=9.0.176.4-1 \
+        libnccl2=$NCCL_VERSION-1+cuda9.0 && \
+    apt-mark hold libnccl2 && \
+    rm -rf /var/lib/apt/lists/*
+
+
+# ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+
+# make directories & copy cudnn from host
+RUN mkdir -p /usr/local/cuda/include
+COPY /cuda/include/* /usr/local/cuda/include/
+COPY /cuda/lib64/* /usr/local/cuda/targets/x86_64-linux/lib/
+
+RUN mkdir -p /container/
+WORKDIR /container
+
+COPY containers/python/__init__.py containers/python/tf_container.py containers/python/container_entry.sh containers/python/rpc.py /container/
+COPY monitoring/metrics_config.yaml /container/
+
+RUN pip3 install --upgrade pip
+
+# install tensorflow gpu
+RUN pip3 install tensorflow-gpu
+RUN pip3 install clipper_admin
+
+ENV CLIPPER_MODEL_PATH=/model
+
+CMD ["/container/container_entry.sh", "tensorflow-container", "/container/tf_container.py"]
+
+HEALTHCHECK --interval=3s --timeout=3s --retries=1 CMD test -f /model_is_ready.check || exit 1
